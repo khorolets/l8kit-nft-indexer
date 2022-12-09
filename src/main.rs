@@ -4,14 +4,11 @@ use l8kit::{
     types::{EventsTrait}
 };
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+fn main() -> anyhow::Result<()> {
     eprintln!("Starting...");
     l8kit::L8kit::mainnet()
         .from_block(77340040)
         .run(handle_block)
-        .await?;
-    Ok(())
 }
 
 async fn handle_block(ctx: L8kitContext) -> anyhow::Result<()> {
