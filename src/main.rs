@@ -1,69 +1,71 @@
 use regex::Regex;
-use l8kit::{
-    L8kitContext,
-    types::{EventsTrait}
-};
+// use near_lake_framework::near_lake_primitives::types::events::EventsTrait;
 
 fn main() -> anyhow::Result<()> {
     eprintln!("Starting...");
-    l8kit::L8kit::mainnet()
-        .from_block(77340040)
-        .run(handle_block)
+    // Lake Framework start boilerplate
+    near_lake_framework::LakeBuilder::default()
+        .mainnet()
+        .start_block_height(80504433)
+        .build()
+        .expect("Failed to build Lake")
+        .run(handle_block) // developer-defined async function that handles each block
 }
 
-async fn handle_block(ctx: L8kitContext) -> anyhow::Result<()> {
+async fn handle_block(mut ctx: near_lake_framework::LakeContext) -> anyhow::Result<()> {
     println!("Block {:?}", ctx.block.header().height);
     let re = Regex::new(r"^*.mintbase\d+.near$").unwrap();
 
-    let marketplaces_receipts = ctx.block
-        .receipts()
+    // Indexing lines START
+    let nfts: Vec<NFTReceipt> = ctx
+        .events() // getting all the events happened in the block
         .iter()
-        .filter_map(|executed_receipt| {
-            let mint_nft_events: Vec<l8kit::types::Event> = executed_receipt
-                .events()
-                .iter()
-                .cloned()
-                .filter(|event| event.event.as_str() == "nft_mint")
-                .collect();
-            if !mint_nft_events.is_empty() {
-                Some((executed_receipt, mint_nft_events))
+        .filter(|(_receipt_id, event)| event.event.as_str() == "nft_mint") // filter them by "nft_mint" event only
+        .filter_map(|(receipt_id, event)| {
+            // Next we're parsing the event to catch Marketplaces we know (Mintbase and Paras)
+            // then we parse the event_data to extract: owner, link to the NFT
+            // collect all the NFTs (excluding Marketplaces or contracts we don't know how to parse)
+            // and print data about caught NFTS to the terminal
+            // NB! The logic on the next lines DOES NOT relate to Lake Framework!
+            let receipt = &ctx.action_by_receipt_id(receipt_id)
+                .expect("Expect `ActionReceipt` to be included in the block");
+            let marketplace = {
+                if re.is_match(receipt.receiver_id.as_str()) {
+                    Marketplace::Mintbase
+                } else if receipt.receiver_id.as_str() == "x.paras.near" {
+                    Marketplace::Paras
+                } else {
+                    Marketplace::Unknown
+                }
+            };
+
+            if let Some(nft) = marketplace.convert_event_data_to_nfts(
+                event.clone().data,
+                receipt.receiver_id.to_string(),
+            ) {
+                Some(NFTReceipt {
+                    receipt_id: receipt.receipt_id.to_string(),
+                    marketplace_name: marketplace.name(),
+                    nfts: vec![nft],
+                })
             } else {
                 None
             }
-        });
+        })
+        .collect();
+    // Indexing lines END
 
-    let mut results: Vec<NFTReceipt> = vec![];
-    for (receipt, events) in marketplaces_receipts {
-        let marketplace_name = {
-            if re.is_match(receipt.receiver_id.as_str()) {
-                Marketplace::Mintbase
-            } else if receipt.receiver_id.as_str() == "x.paras.near" {
-                Marketplace::Paras
-            } else {
-                Marketplace::Unknown
-            }
-        };
-
-        results.push(NFTReceipt {
-            receipt_id: receipt.receipt_id.to_string(),
-            marketplace_name: marketplace_name.name(),
-            nfts: events
-                .into_iter()
-                .filter_map(|event|
-                    marketplace_name
-                        .convert_event_data_to_nfts(
-                            event.data,
-                            receipt.receipt_id.to_string()
-                        )
-                )
-                .collect(),
-        });
-    }
-    if !results.is_empty() {
-        println!("We caught freshly minted NFTs!\n{:#?}", results);
+    if !nfts.is_empty() {
+        println!("We caught freshly minted NFTs!\n{:#?}", nfts);
     }
     Ok(())
 }
+
+// Next lines are just defined structures and methods to support
+// our indexing goal: catch NFT MINT events and print links
+// to newly created NFTS
+// Next lines have nothing to do about the NEAR Lake Framework
+// It is developer-defined logic for indexing their needs
 
 enum Marketplace {
     Mintbase,
@@ -95,7 +97,6 @@ impl Marketplace {
 
     fn paras(&self, event_data: Option<serde_json::Value>, receiver_id: String) -> Option<NFT> {
         if let Some(data) = event_data {
-            println!("{:?}", data);
             let paras_event_data = serde_json::from_value::<Vec<ParasEventData>>(data).unwrap();
             Some(NFT {
                 owner: paras_event_data[0].owner_id.clone(),
@@ -119,12 +120,10 @@ impl Marketplace {
 
     fn mintbase(&self, event_data: Option<serde_json::Value>, receiver_id: String) -> Option<NFT> {
         if let Some(data) = event_data {
-            println!("{:#?}", data);
             let mintbase_event_data = serde_json::from_value::<Vec<MintbaseEventData>>(data).unwrap();
-            let memo = serde_json::from_str::<MintbaseDataMemo>(&mintbase_event_data[0].memo).unwrap();
             Some(NFT {
                 owner: mintbase_event_data[0].owner_id.clone(),
-                links: vec![format!("https://mintbase.io/thing/{}:{}", memo.meta_id, receiver_id)],
+                links: vec![format!("https://mintbase.io/contract/{}/token/{}", receiver_id, mintbase_event_data[0].token_ids[0])],
             })
         } else {
             None
@@ -136,6 +135,7 @@ impl Marketplace {
     }
 }
 
+#[allow(dead_code)]
 #[derive(Debug)]
 struct NFTReceipt {
     receipt_id: String,
@@ -143,6 +143,7 @@ struct NFTReceipt {
     nfts: Vec<NFT>
 }
 
+#[allow(dead_code)]
 #[derive(Debug)]
 struct NFT {
     owner: String,
@@ -158,11 +159,5 @@ struct ParasEventData {
 #[derive(Debug, serde::Deserialize)]
 struct MintbaseEventData {
     owner_id: String,
-    memo: String,
-}
-
-#[derive(Debug, serde::Deserialize)]
-struct MintbaseDataMemo {
-    meta_id: String,
-    minter: String,
+    token_ids: Vec<String>,
 }
